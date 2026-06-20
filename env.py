@@ -7,9 +7,12 @@ from mapCreator import  create_map
 
 #Penalties and rewards
 STEP_COST = -1
-TOXIC_PENALTY = -10
+TOXIC_PENALTY = -20
+HEAL_REWARD = 20
 GOAL_REWARD = 100
 OUT_OF_ENERGY_PENALTY = -50
+RETURNTOSTART_PENALTY = -2
+WALLBUMB_PENALTY = -2
 
 #Energy cost for actions
 ENERGY_COST = 1
@@ -29,7 +32,9 @@ _DELTA = {
     ACTION_DOWN: (+1, 0),
     ACTION_LEFT: (0, -1),
 }
-
+# Cell type for unseen cells in the observation, as in the "fog of war".
+FOG = 6 
+MINFOG =2 
 
 class ToxicSwampEnv(gym.Env):
     """Custom Environment that follows gym interface"""
@@ -43,7 +48,7 @@ class ToxicSwampEnv(gym.Env):
         toxic_pct=0.25,
         healthy_pct=0.10,
         slippery=0.0,
-        fog_radius=2,
+        fog_radius=4,
         max_energy=50,
         energy_bins=10,
         render_mode=None,
@@ -60,15 +65,18 @@ class ToxicSwampEnv(gym.Env):
         self.max_energy  = max_energy
         self.energy_bins = energy_bins
         self.render_mode = render_mode
-        self._agent_position = 0
+        
         
         self.step_cost = STEP_COST
         self.toxic_penalty = TOXIC_PENALTY
+        self.wall_bump_penalty = WALLBUMB_PENALTY
+        self.heal_reward = HEAL_REWARD
         self.goal_reward = GOAL_REWARD
 
         self.energy_cost = ENERGY_COST
         self.healthy_cell_energy_reward = HEALTHY_CELL_ENERGY_REWARD
         self.out_of_energy_penalty = OUT_OF_ENERGY_PENALTY # Penalty for running out of energy
+        self.return_to_start_penalty = RETURNTOSTART_PENALTY # Penalty for returning to the start position
 
 
         # Grid width and height are determined by the map_fn when we create the map on the fly in reset() method, but we need to create the map here to get the dimensions for  observation space
@@ -87,7 +95,7 @@ class ToxicSwampEnv(gym.Env):
         # Observations: discrete states corresponding to grid positions clipped to fog radius + energy bin
         window_size = (2 * self.fog_radius + 1) ** 2   # e.g. 5x5 = 25
         self.observation_space = gym.spaces.MultiDiscrete(
-            [6] * window_size + [self.energy_bins + 1]  # 25 cell types + 1 energy bin
+            [7] * window_size   + [self.energy_bins + 1]  # 25 cell types + 1 energy bin
         )
         # Rendering required parameters
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
@@ -112,9 +120,12 @@ class ToxicSwampEnv(gym.Env):
         self.grid, toxic_cells, healthy_cells, self.start_pos, self.goal_pos = map_fn(
             self.toxic_pct, self.healthy_pct, seed=seed
         )
+       
 
         self.toxic_cells   = set(map(tuple, toxic_cells))
         self.healthy_cells = set(map(tuple, healthy_cells))
+        # New heihgt and width 
+        self.grid_height, self.grid_width = self.grid.shape 
 
         # Reset energy to max at the start of each episode
         self.energy = self.max_energy
@@ -124,8 +135,6 @@ class ToxicSwampEnv(gym.Env):
         obs = self._get_obs()
         return obs, {}
 
-    def get_state(self):
-        return self._agent_position
 
 
 
@@ -142,8 +151,9 @@ class ToxicSwampEnv(gym.Env):
         if not self.action_space.contains(action):
             raise ValueError(f"Invalid action {action!r}; expected 0..3.")
 
-        effective_action = self._sample_effective_action(action)
-        landing = self._intended_landing(self._agent_pos, effective_action)
+        
+        landing = self._intended_landing(self._agent_pos, action)
+
         self._agent_pos = landing
         self.energy -= self.energy_cost  # Energy cost for taking an action
        
@@ -152,19 +162,25 @@ class ToxicSwampEnv(gym.Env):
         if landing == self.goal_pos:
             reward = self.goal_reward
             terminated = True
+        elif landing == self.start_pos:
+            reward = self.return_to_start_penalty
+
+            terminated = False
         elif landing in self.toxic_cells:
             #Only a horrible reward, but we can still continue the episode
             #as we are in a swamp and we can get out of it
             """ self._agent_pos = self.start_pos """
             
-            reward = self.toxic_penalty
+            reward = self.step_cost + self.toxic_penalty
+            self.energy -= 2  # Additional energy cost for landing on a toxic cell
             terminated = False
 
         #Healthy cellhandling
         elif landing in self.healthy_cells:
             self.energy += self.healthy_cell_energy_reward
             
-            reward = self.step_cost + self.healthy_cell_energy_reward  # Step cost is still applied, but we get a net positive reward for the healthy cell
+            reward = self.step_cost + self.heal_reward  # Step cost is still applied, but we get a net positive reward for the healthy cell
+            self.healthy_cells.discard(landing)  # one-time bonus
             terminated = False
         else:
             
@@ -180,54 +196,35 @@ class ToxicSwampEnv(gym.Env):
         truncated = False
         self._episode_return += reward
         obs = self._get_obs()
-        info = {"effective_action": effective_action}
+        info = {"effective_action": action}
         return obs, reward, terminated, truncated, info
 
 
 
-    ## Slippery action sampling
-    def _sample_effective_action(self, action: int) -> int:
-        if self.slippery == 0.0:
-            return action
-        else:
-            # With probability `slippery`, take a random action instead of the intended one.
-            if self.np_random.random() < self.slippery:
-                return self.action_space.sample()
-            else:
-                return action
 
 
     def close(self) -> None:
         pass
 
-    def _get_obs(self) -> dict:
-        """
-        Return the local fog-of-war window centered on the agent + energy bin.
-        
-        Window cells are encoded as:
-            EMPTY=0, TOXIC=1, HEALTHY=2, START=3, GOAL=4, WALL=5
-        Out-of-bounds cells are encoded as WALL (5).
-        """
-        r, c   = self._agent_pos
-        radius = max(0, int(self.fog_radius * self.energy / self.max_energy))
+    def _get_obs(self):
+        r, c = self._agent_pos
+        max_radius = self.fog_radius
+        visible_radius = max(MINFOG, int(self.fog_radius * self.energy / self.max_energy))
 
         window = []
-
-        for dr in range(-radius, radius + 1):      # rows top → bottom
-            for dc in range(-radius, radius + 1):  # cols left → right
+        for dr in range(-max_radius, max_radius + 1):
+            for dc in range(-max_radius, max_radius + 1):
                 nr, nc = r + dr, c + dc
-                if 0 <= nr < self.grid_height and 0 <= nc < self.grid_width:
+                if max(abs(dr), abs(dc)) > visible_radius:
+                    window.append(FOG)              # outside current vision
+                elif 0 <= nr < self.grid_height and 0 <= nc < self.grid_width:
                     window.append(int(self.grid[nr, nc]))
                 else:
-                    window.append(5)               # WALL — out of bounds
+                    window.append(5)                # WALL
 
-        # Discretise energy into bins: full energy → bin 10, empty → bin 0
-        energy_bin = int(self.energy / self.max_energy * self.energy_bins)
-        energy_bin = np.clip(energy_bin, 0, self.energy_bins)
-
-        #Enegy bin is added here for the agent to be able to learn to manage its energy and avoid running out of it
-        return np.array(window + [int(energy_bin)], dtype=np.int64)
-
+        energy_bin = int(np.clip(self.energy / self.max_energy * self.energy_bins, 0, self.energy_bins))
+        return np.array(window + [energy_bin], dtype=np.int64)
+        #return np.array(window + [energy_bin], dtype=np.int64)
 
     # ---------------------------------------------------------------------
     # Rendering
@@ -271,6 +268,22 @@ class ToxicSwampEnv(gym.Env):
 
         # Background
         img = np.tile(self._COLOR_FREE, (h_px, w_px, 1))
+
+        # ── Fog of war overlay ────────────────────────────────────────────
+        visible_radius = max(MINFOG, int(self.fog_radius * self.energy / self.max_energy))
+        ar, ac = self._agent_pos
+        fog_color = np.array([0.3, 0.3, 0.3])   # dark grey
+
+        for row in range(self.grid_height):
+            for col in range(self.grid_width):
+                if max(abs(row - ar), abs(col - ac)) > visible_radius:
+                    r0, r1 = row * cell, (row + 1) * cell
+                    c0, c1 = col * cell, (col + 1) * cell
+                    # Blend 70% fog over the existing cell colour
+                    img[r0:r1, c0:c1] = (
+                        0.7 * fog_color + 0.3 * img[r0:r1, c0:c1]
+                    )
+
 
         # Paint special cells.
         def paint_cell(pos: tuple[int, int], color: np.ndarray) -> None:

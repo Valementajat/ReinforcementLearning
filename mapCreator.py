@@ -14,7 +14,8 @@ def create_map(  toxic_pct, healthy_pct, seed=None):
         np.random.seed(seed)
 
 
-    grid_height, grid_width = np.random.randint(5, 10), np.random.randint(7, 12)
+    """     grid_height, grid_width = np.random.randint(5, 10), np.random.randint(7, 12) """
+    grid_height, grid_width = 10, 12
    
     grid = np.zeros((grid_height, grid_width), dtype=int)
 
@@ -22,6 +23,11 @@ def create_map(  toxic_pct, healthy_pct, seed=None):
     start_pos = (grid_height - 1, 0)  
     goal_pos = (grid_height - 1, grid_width - 1)
  
+    # Test for a bug 
+    start_idx = start_pos[0] * grid_width + start_pos[1]
+    goal_idx = goal_pos[0] * grid_width + goal_pos[1]
+    reserved = {start_idx, goal_idx}
+    all_idx = [i for i in range(grid_height * grid_width) if i not in reserved]
 
     # Calculate the number of toxic and healthy cells based on the specified percentages
     # The percentage of toxic cells is not possibly to exactly match the number of cells as in healthy cells, 
@@ -29,12 +35,12 @@ def create_map(  toxic_pct, healthy_pct, seed=None):
     # But this is good enough for us, lets say that this way we create a toxic swamp to traverse in the fog ;)
     num_toxic_cells = int(grid_height * grid_width * toxic_pct)
     
-    toxic_cells = np.random.choice(grid_height * grid_width, size=num_toxic_cells, replace=False)
+    toxic_cells = np.random.choice(all_idx, size=num_toxic_cells, replace=False)
     toxic_cells = [(cell // grid_width, cell % grid_width) for cell in toxic_cells]
 
     #Healthy cells 
     num_healthy_cells = int(grid_height * grid_width * healthy_pct)
-    healthy_cells = np.random.choice(grid_height * grid_width, size=num_healthy_cells, replace=False)
+    healthy_cells = np.random.choice(all_idx, size=num_healthy_cells, replace=False)
     healthy_cells = [(cell // grid_width, cell % grid_width) for cell in healthy_cells]
 
     for cell in toxic_cells:
