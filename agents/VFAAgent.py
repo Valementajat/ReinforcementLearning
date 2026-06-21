@@ -94,6 +94,7 @@ class VFAAgent:
     def __init__(self, actions, featurize, w,alpha=0.1, gamma=0.9, epsilon=1.0, epsilon_min=0.05, epsilon_decay=0.999,seed=None):
         self.actions = actions
         self.featurize = featurize
+        # wights vector, at start [0, ... , n]
         self.w = w
         # LR and discount factor
         self.alpha = float(alpha)
@@ -105,31 +106,40 @@ class VFAAgent:
         self.epsilon_decay = float(epsilon_decay)
         self._rng = np.random.default_rng(  seed)
 
-
+    # Q^​(s,a,w)=wTx(s,a).
+    # Matrix multiplication
     def q_value(self, state, action):
         x = self.featurize(state, action)
         return np.dot(self.w, x)
 
+    # Epsilon greedy
     def select_action(self, state):
         if self._rng.random() < self.epsilon:
             return self._rng.choice(self.actions)
+        
+        # If not epsilon then map the q values approximation for each action 
         q_values = [self.q_value(state, a) for a in self.actions]
         # print(f"q_values: {q_values}")  # Debugging line to print q_values
         
+        # Return  action 
         return self._argmax_random_tiebreak(np.array(q_values))
 
     def update(self, state, action, reward, next_state, terminated: bool):
         x = self.featurize(state, action)
 
+        # In case terminated then target is just reward, to not add noise 
         if terminated:
             target = float(reward)
         else:
+            # α(target−Q^​(st​,at​,w))x(st​,at​)
             best_next_q = max(self.q_value(next_state, a) for a in self.actions)
+            # target=rt+1​+γa′max​Q^​(st+1​,a′,w)
             target = reward + self.gamma * best_next_q
 
 
         
         td_error = target - self.q_value(state, action)
+        #Δw=α(target−Q^​(st_​,a_t​,w))x(s_t​,a_t​)
         self.w += self.alpha * td_error * x
 
     def _argmax_random_tiebreak(self, values: np.ndarray) -> int:
